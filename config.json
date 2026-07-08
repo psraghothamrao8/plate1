@@ -17,9 +17,9 @@
             "export_json":  "backend/req_files//segmentation/Export_TF.json"
         },
         "objectdetection": {
-            "train_json": "backend/req_files/objectdetection/Training.json",
-            "test_json": "backend/req_files/objectdetection/Testing.json",
-            "eval_json": "backend/req_files/objectdetection/Evaluation.json",
+            "train_json": "backend/req_files/objectdetection/Model/Train/Training.json",
+            "test_json": "backend/req_files/objectdetection/Model/Test/Testing.json",
+            "eval_json": "backend/req_files/objectdetection/Model/Train/Evaluation.json",
             "model_config_src": "backend/req_files/objectdetection/ModelConfig/",
             "default_gan_config": "backend/req_files/objectdetection/config_gan.json",
             "export_json":  "backend/req_files//objectdetection/Export_TF.json"

@@ -42,19 +42,24 @@ TRAINING_TYPE = "classification"
 
 # DL mode strings per training type
 DL_MODES = {
-    "classification": {"Train": "Train", "Evaluate": "Evaluate", "Test": "Test"},
-    "segmentation":   {"Train": "segTrainBinary", "Evaluate": "segEvaluateBinary", "Test": "segTestBinary"},
+    "classification":  {"Train": "Train", "Evaluate": "Evaluate", "Test": "Test"},
+    "segmentation":    {"Train": "segTrainBinary", "Evaluate": "segEvaluateBinary", "Test": "segTestBinary"},
+    "objectdetection": {"Train": "ODMTrain", "Evaluate": "ODMEvaluate", "Test": "ODMTest"},
 }
 
 # Template directories: JSON configs (and, for segmentation, model files) live here.
 # Classification templates are in req_files/<classification_subfolder>/
 # Segmentation templates (JSON + ModelConfig) are in req_files/segmentation/
+# Object detection templates (YOLO OBB) are in req_files/objectdetection/Model/Train|Test/
 # Use __file__ so the path is always relative to this file (backend/services/),
 # not BASE_DIR which resolves to the project root (one level above backend/).
 _SERVICES_DIR = os.path.dirname(os.path.abspath(__file__))
 _BACKEND_DIR  = os.path.dirname(_SERVICES_DIR)
 CLASSIFICATION_TEMPLATE_DIR = os.path.join(_BACKEND_DIR, "req_files", "classification")
 SEGMENTATION_TEMPLATE_DIR   = os.path.join(_BACKEND_DIR, "req_files", "segmentation")
+OBJECTDETECTION_TEMPLATE_DIR       = os.path.join(_BACKEND_DIR, "req_files", "objectdetection")
+OBJECTDETECTION_TRAIN_TEMPLATE_DIR = os.path.join(OBJECTDETECTION_TEMPLATE_DIR, "Model", "Train")
+OBJECTDETECTION_TEST_TEMPLATE_DIR  = os.path.join(OBJECTDETECTION_TEMPLATE_DIR, "Model", "Test")
 
 
 # ----------------------------------------------------------------------
@@ -1250,6 +1255,344 @@ def scan_dataset_and_update_configs_seg(
 
 
 # ----------------------------------------------------------------------
+# Object Detection (YOLO OBB): dataset scanning + JSON update helpers
+# ----------------------------------------------------------------------
+# Unlike classification/segmentation, Training.json/Evaluation.json/Testing.json for
+# object detection carry no embedded image list (trainImglst/ValImgList/testImglst stay
+# null). The annotated image list instead lives in separate dataset-descriptor JSONs:
+#   - d.json            : combined Train+Val annotations, next to Training.json/Evaluation.json
+#   - Input_Train.json  : Train-only annotations, same folder
+#   - Input_Val.json    : Val-only annotations, same folder
+#   - d.json            : Test-only annotations, next to Testing.json (a *different* file
+#                          of the same name, since it lives in the Test model folder)
+# Evaluation.json/Testing.json point at their local d.json via Model.multi_dataset_names
+# and the top-level Datasets list (both reference dataset name "d" == "d.json" resolved in
+# the same directory as the JSON file itself). Training.json has no such pointer — it picks
+# up Input_Train.json/Input_Val.json from its own folder by fixed filename.
+def csv_scan_objdet_annotations(
+    csv_path: str,
+) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict], List[Dict], List[Dict]]:
+    """Read train_dataset.csv and build ANNOTATIONS-format entries (ImagePath/MaskPath/
+    Points/ImgW/ImgH) split into base/new x train/val/test buckets, mirroring csv_scan_seg_images
+    but keyed off `model_bbox_url` (annotation .txt path) instead of `model_mask_url`.
+    """
+    df = pd.read_csv(csv_path)
+    base_train, base_val, base_test = [], [], []
+    new_train, new_val, new_test = [], [], []
+
+    for row in df.itertuples(index=True):
+        bbox_path = row.model_bbox_url if hasattr(row, 'model_bbox_url') and pd.notna(row.model_bbox_url) else None
+        width, height = _read_image_dimensions(row.image_url)
+        entry = {
+            "ImagePath": row.image_url,
+            "MaskPath":  bbox_path,
+            "Points":    None,
+            "ImgW":      width,
+            "ImgH":      height,
+        }
+        if row.Data_type == "Base":
+            if row.set == "Train":
+                base_train.append(entry)
+            elif row.set == "Val":
+                base_val.append(entry)
+            else:
+                base_test.append(entry)
+        else:
+            if row.set == "Train":
+                new_train.append(entry)
+            elif row.set == "Val":
+                new_val.append(entry)
+            else:
+                new_test.append(entry)
+            # New data has no Test set; New_Test inference uses new_train + new_val
+
+    return base_train, base_val, base_test, new_train, new_val, new_test
+
+
+def write_objdet_annotations_json(path: str, entries: List[Dict]) -> bool:
+    """Write a dataset-descriptor JSON (d.json / Input_Train.json / Input_Val.json)."""
+    return dump_json({"ANNOTATIONS": entries}, path)
+
+
+def _apply_objdet_dataset_pointer(data: Dict, dataset_name: str) -> None:
+    """Point Model.multi_dataset_names / top-level Datasets at <dataset_name>.json,
+    resolved relative to the folder the JSON file itself lives in."""
+    if "Model" in data:
+        data["Model"]["multi_dataset_names"] = [dataset_name]
+    data["Datasets"] = [{"Id": 1, "Name": dataset_name, "BatchRate": 1.0}]
+
+
+def _apply_objdet_model_fields(data: Dict, storage_root: str, train_count: int,
+                                val_count: int, test_count: int, hyperparams: Dict,
+                                ref_imgs: List[Dict], model_dir: str = "Train",
+                                rect_dims: Optional[Tuple[int, int]] = None,
+                                roi_type: Optional[str] = None) -> None:
+    """Mutate data['Model'] with object-detection-specific fields (counts, dims, hyperparams)."""
+    if "Model" not in data:
+        return
+    m = data["Model"]
+    m["iTrainImgCount"]      = train_count
+    m["iValidationImgCount"] = val_count
+    m["iTestImgCount"]       = test_count
+    m["SolutionDir"]         = str(storage_root) + "//"
+    m["tfrec_lmdb_path"]     = str(storage_root) + "//"
+    m["ModelDir"]            = model_dir
+    m["name"]                = get_latest_model_name(storage_root)
+    m["epochs"]              = hyperparams.get("epochs",     _DEFAULT_HPARAMS.get("epochs",   100))
+    m["valRatio"]            = hyperparams.get("valRatio",   _DEFAULT_HPARAMS.get("valRatio",  20))
+    m["minEpoch"]            = hyperparams.get("minEpoch",   _DEFAULT_HPARAMS.get("minEpoch",   0))
+    m["patience"]            = hyperparams.get("patience",   _DEFAULT_HPARAMS.get("patience",  50))
+
+    # Image dimensions: prefer imported model dims, then the first annotated image, then template default
+    if rect_dims:
+        m["iRectWidth"]  = rect_dims[0]
+        m["iRectHeight"] = rect_dims[1]
+        m["iWidth"]      = rect_dims[0]
+        m["iHeight"]     = rect_dims[1]
+    elif ref_imgs:
+        width, height = ref_imgs[0].get("ImgW"), ref_imgs[0].get("ImgH")
+        if width and height:
+            m["iRectWidth"]  = width
+            m["iRectHeight"] = height
+            m["iWidth"]      = width
+            m["iHeight"]     = height
+
+    if roi_type:
+        m["strROIType"] = roi_type
+
+
+def update_objdet_training_json(path: str, storage_root: str,
+                                 train_imgs: List[Dict], val_imgs: List[Dict],
+                                 hyperparams: Dict,
+                                 rect_dims: Optional[Tuple[int, int]] = None,
+                                 roi_type: Optional[str] = None) -> bool:
+    data = load_json(path)
+    if data is None:
+        return False
+    _apply_objdet_model_fields(data, storage_root, len(train_imgs), len(val_imgs), 0,
+                                hyperparams, train_imgs or val_imgs, rect_dims=rect_dims, roi_type=roi_type)
+    data["trainImglst"] = None
+    data["ValImgList"]  = None
+    data["testImglst"]  = None
+    return dump_json(data, path)
+
+
+def update_objdet_evaluation_json(path: str, storage_root: str,
+                                   eval_imgs: List[Dict], hyperparams: Dict,
+                                   rect_dims: Optional[Tuple[int, int]] = None,
+                                   roi_type: Optional[str] = None) -> bool:
+    data = load_json(path)
+    if data is None:
+        return False
+    _apply_objdet_model_fields(data, storage_root, len(eval_imgs), 0, 0,
+                                hyperparams, eval_imgs, rect_dims=rect_dims, roi_type=roi_type)
+    _apply_objdet_dataset_pointer(data, "d")
+    data["trainImglst"] = None
+    data["ValImgList"]  = None
+    data["testImglst"]  = None
+    return dump_json(data, path)
+
+
+def update_objdet_testing_json(path: str, storage_root: str,
+                                test_imgs: List[Dict], hyperparams: Dict,
+                                rect_dims: Optional[Tuple[int, int]] = None,
+                                roi_type: Optional[str] = None) -> bool:
+    data = load_json(path)
+    if data is None:
+        return False
+    _apply_objdet_model_fields(data, storage_root, 0, 0, len(test_imgs),
+                                hyperparams, test_imgs, model_dir="Test", rect_dims=rect_dims, roi_type=roi_type)
+    _apply_objdet_dataset_pointer(data, "d")
+    data["trainImglst"] = None
+    data["ValImgList"]  = None
+    data["testImglst"]  = None
+    return dump_json(data, path)
+
+
+def _ensure_objdet_templates(train_json: str, eval_json: str, test_json: str) -> bool:
+    """Copy Training/Evaluation/Testing.json from the objectdetection templates.
+    Training.json is kept as-is if already present (e.g. carries imported-model params);
+    Evaluation.json/Testing.json are always overwritten so they're never derived from
+    stale Training.json content."""
+    if not ensure_json_from_template(train_json, "Training.json", OBJECTDETECTION_TRAIN_TEMPLATE_DIR):
+        return False
+
+    for target, name, tpl_dir in [
+        (eval_json, "Evaluation.json", OBJECTDETECTION_TRAIN_TEMPLATE_DIR),
+        (test_json, "Testing.json",    OBJECTDETECTION_TEST_TEMPLATE_DIR),
+    ]:
+        candidates = [os.path.join(tpl_dir, name.lower()), os.path.join(tpl_dir, name)]
+        src = next((c for c in candidates if os.path.exists(c)), None)
+        if src is None:
+            logger.error(f"Object detection template {name} not found in {tpl_dir}")
+            return False
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copy(src, target)
+
+    return True
+
+
+def _write_objdet_dataset_files(paths_dict: Dict, train_imgs: List[Dict], val_imgs: List[Dict],
+                                 eval_imgs: List[Dict], test_imgs: List[Dict], has_test: bool) -> bool:
+    """Write d.json/Input_Train.json/Input_Val.json next to Training.json — d.json mirrors
+    whatever Evaluation.json's dataset pointer resolves to (eval_imgs) — and the test-side
+    d.json next to Testing.json."""
+    train_dir = paths_dict["train_dir"]
+    test_dir  = paths_dict["test_dir"]
+    os.makedirs(train_dir, exist_ok=True)
+
+    if not write_objdet_annotations_json(os.path.join(train_dir, "d.json"), eval_imgs):
+        return False
+    if not write_objdet_annotations_json(os.path.join(train_dir, "Input_Train.json"), train_imgs):
+        return False
+    if not write_objdet_annotations_json(os.path.join(train_dir, "Input_Val.json"), val_imgs):
+        return False
+
+    if has_test:
+        os.makedirs(test_dir, exist_ok=True)
+        if not write_objdet_annotations_json(os.path.join(test_dir, "d.json"), test_imgs):
+            return False
+
+    return True
+
+
+def csv_scan_dataset_and_update_configs_objdet(
+    dataset_csv_path: str,
+    storage_root: str,
+    hyperparams: Optional[Dict] = None,
+) -> Dict:
+    """
+    Object detection (YOLO OBB): scan train_dataset.csv and update Training/Evaluation/Testing
+    JSONs plus the dataset descriptor files (d.json / Input_Train.json / Input_Val.json).
+    Returns {"success": bool, "has_test": bool}.
+    """
+    logger.info("Scanning object detection dataset from CSV and updating JSON configurations...")
+    if hyperparams is None:
+        hyperparams = {}
+
+    _fail = {"success": False, "has_test": False}
+
+    base_train, base_val, base_test, new_train, new_val, new_test = csv_scan_objdet_annotations(dataset_csv_path)
+
+    train_imgs = base_train + new_train
+    val_imgs   = base_val + new_val
+    test_imgs  = base_test
+    has_test   = len(test_imgs) > 0
+
+    if not val_imgs and train_imgs:
+        val_ratio = hyperparams.get("valRatio", 20) / 100.0
+        split_idx = max(1, int(len(train_imgs) * (1 - val_ratio)))
+        val_imgs   = train_imgs[split_idx:]
+        train_imgs = train_imgs[:split_idx]
+        logger.info(f"No Val data in CSV; auto-split → {len(train_imgs)} train, {len(val_imgs)} val.")
+
+    model_name = get_latest_model_name(storage_root)
+    paths_dict = get_model_paths(storage_root, model_name)
+    train_json = paths_dict["training_json"]
+    test_json  = paths_dict["testing_json"]
+    eval_json  = paths_dict["evaluation_json"]
+
+    if not _ensure_objdet_templates(train_json, eval_json, test_json):
+        return _fail
+
+    logger.info(f"ObjDet CSV: {len(train_imgs)} train, {len(val_imgs)} val, {len(test_imgs)} test images.")
+
+    rect_dims = _read_imported_rect_dims(storage_root)
+    roi_type  = _read_imported_roi_type(storage_root)
+
+    if not update_objdet_training_json(train_json, storage_root, train_imgs, val_imgs, hyperparams,
+                                        rect_dims=rect_dims, roi_type=roi_type):
+        return _fail
+
+    eval_imgs = train_imgs + val_imgs
+    if not update_objdet_evaluation_json(eval_json, storage_root, eval_imgs, hyperparams,
+                                          rect_dims=rect_dims, roi_type=roi_type):
+        return _fail
+
+    if has_test:
+        if not update_objdet_testing_json(test_json, storage_root, test_imgs, hyperparams,
+                                           rect_dims=rect_dims, roi_type=roi_type):
+            return _fail
+
+    if not _write_objdet_dataset_files(paths_dict, train_imgs, val_imgs, eval_imgs, test_imgs, has_test):
+        return _fail
+
+    logger.info("Object detection CSV JSON configurations updated successfully.")
+    return {"success": True, "has_test": has_test}
+
+
+def inf_csv_scan_dataset_and_update_configs_objdet(
+    dataset_csv_path: str,
+    storage_root: str,
+    label=None,
+) -> Dict:
+    """Object detection inference-time variant of csv_scan_dataset_and_update_configs_objdet —
+    buckets Base/New_Test images the same way inf_csv_scan_dataset_and_update_configs_seg does."""
+    logger.info("Scanning object detection dataset from CSV for inference...")
+
+    _fail = {"success": False, "has_test": False}
+
+    base_train, base_val, base_test, new_train, new_val, new_test = csv_scan_objdet_annotations(dataset_csv_path)
+
+    if "Deployed" in label:
+        if "Baseline" in label:
+            train_imgs = base_train
+            val_imgs   = base_val
+            test_imgs  = base_test
+        elif "New_Test" in label:
+            train_imgs = new_train
+            val_imgs   = new_val
+            test_imgs  = new_train + new_val + new_test
+    else:
+        if "Baseline" in label:
+            train_imgs = base_train
+            val_imgs   = base_val
+            test_imgs  = base_test + new_test
+        elif "New_Test" in label:
+            train_imgs = new_train
+            val_imgs   = new_val
+            test_imgs  = new_train + new_val + new_test
+
+    has_test = len(test_imgs) > 0
+
+    model_name = get_latest_model_name(storage_root)
+    paths_dict = get_model_paths(storage_root, model_name)
+    train_json = paths_dict["training_json"]
+    test_json  = paths_dict["testing_json"]
+    eval_json  = paths_dict["evaluation_json"]
+
+    if not _ensure_objdet_templates(train_json, eval_json, test_json):
+        return _fail
+
+    hyperparams: Dict = {}
+
+    rect_dims = _read_imported_rect_dims(storage_root)
+    roi_type  = _read_imported_roi_type(storage_root)
+
+    if not update_objdet_training_json(train_json, storage_root, train_imgs, val_imgs, hyperparams,
+                                        rect_dims=rect_dims, roi_type=roi_type):
+        return _fail
+
+    # Eval uses train+val combined (matches d.json); fall back to test if both are empty
+    # (e.g. New_Test with no new train/val rows).
+    eval_imgs = (train_imgs + val_imgs) if (train_imgs or val_imgs) else test_imgs
+    if not update_objdet_evaluation_json(eval_json, storage_root, eval_imgs, hyperparams,
+                                          rect_dims=rect_dims, roi_type=roi_type):
+        return _fail
+
+    if has_test:
+        if not update_objdet_testing_json(test_json, storage_root, test_imgs, hyperparams,
+                                           rect_dims=rect_dims, roi_type=roi_type):
+            return _fail
+
+    if not _write_objdet_dataset_files(paths_dict, train_imgs, val_imgs, eval_imgs, test_imgs, has_test):
+        return _fail
+
+    logger.info("Object detection CSV inference JSON configurations updated successfully.")
+    return {"success": True, "has_test": has_test}
+
+
+# ----------------------------------------------------------------------
 # DL Process Wrapper
 # ----------------------------------------------------------------------
 def generate_config_json(config_path, mode="Train", params=None, training_type="classification"):
@@ -1378,8 +1721,9 @@ def monitor_log(path, status):
 def run_dl_process_wrapper(config_path, status, mode="Train"):
     """
     Execute DLProcessWrapper.exe with the given config and mode string.
-    For classification : mode in {"Train", "Evaluate", "Test"}
-    For segmentation   : mode in {"segTrainBinary", "segEvaluateBinary", "segTestBinary"}
+    For classification    : mode in {"Train", "Evaluate", "Test"}
+    For segmentation      : mode in {"segTrainBinary", "segEvaluateBinary", "segTestBinary"}
+    For object detection  : mode in {"ODMTrain", "ODMEvaluate", "ODMTest"}
     """
     exe_path = DL_PROCESS_WRAPPER_PATH
     if not os.path.exists(exe_path):
@@ -1390,7 +1734,7 @@ def run_dl_process_wrapper(config_path, status, mode="Train"):
     logger.info(f"Executing: {' '.join(cmd)}")
 
     try:
-        is_training_mode = mode in ("Train", "segTrainBinary")
+        is_training_mode = mode in ("Train", "segTrainBinary", "ODMTrain")
         if is_training_mode and status != "trial":
             import threading
             t = threading.Thread(target=monitor_log, args=(config_path, status))
@@ -1895,6 +2239,15 @@ def run_automated_training(
         if not seg_scan["success"]:
             return {"status": "error", "message": "Failed to scan segmentation dataset and update configurations."}
         has_test_data = seg_scan["has_test"]
+    elif training_type == "objectdetection":
+        objdet_scan = csv_scan_dataset_and_update_configs_objdet(
+            dataset_csv_path=dataset_csv_path,
+            storage_root=storage_root,
+            hyperparams=custom_params or {},
+        )
+        if not objdet_scan["success"]:
+            return {"status": "error", "message": "Failed to scan object detection dataset and update configurations."}
+        has_test_data = objdet_scan["has_test"]
     else:
         # if not scan_dataset_and_update_configs(
         #     custom_dataset_path=custom_dataset_path,
@@ -2250,6 +2603,15 @@ def run_inference(
         if not seg_scan["success"]:
             return {"status": "error", "message": "Failed to scan segmentation dataset and update configurations."}
         has_test_data = seg_scan["has_test"]
+    elif training_type == "objectdetection":
+        objdet_scan = inf_csv_scan_dataset_and_update_configs_objdet(
+            dataset_csv_path=dataset_csv_path,
+            storage_root=storage_root,
+            label=label,
+        )
+        if not objdet_scan["success"]:
+            return {"status": "error", "message": "Failed to scan object detection dataset and update configurations."}
+        has_test_data = objdet_scan["has_test"]
     else:
         # if not scan_dataset_and_update_configs(
         #     custom_dataset_path=file_path,

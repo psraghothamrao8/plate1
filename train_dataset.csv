@@ -1,0 +1,4 @@
+s.no.,image_id,image_url,class_type,class_label,Data_type,set,model_bbox_url
+1,0_0,//107.108.32.106/images/0_0.bmp,OK,OK,Base,Train,//107.108.32.106/labels/0_0.txt
+2,0_2,//107.108.32.106/images/0_2.bmp,OK,OK,Base,Test,//107.108.32.106/labels/0_2.txt
+3,0_5,//107.108.32.106/images/0_5.bmp,OK,OK,Base,Val,//107.108.32.106/labels/0_5.txt

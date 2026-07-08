@@ -1,0 +1,228 @@
+{
+    "paths": {
+        "classification": {
+            "train_json": "backend/req_files/classification/Training.json",
+            "test_json": "backend/req_files/classification/Testing.json",
+            "eval_json": "backend/req_files/classification/Evaluation.json",
+            "model_config_src": "backend/req_files/classification/ModelConfig/",
+            "default_gan_config": "backend/req_files//classification/config_gan.json",
+            "export_json":  "backend/req_files//classification/Export_TF.json"
+        },
+        "segmentation": {
+            "train_json": "backend/req_files/segmentation/Training.json",
+            "test_json": "backend/req_files/segmentation/Testing.json",
+            "eval_json": "backend/req_files/segmentation/Evaluation.json",
+            "model_config_src": "backend/req_files/segmentation/ModelConfig/",
+            "default_gan_config": "backend/req_files/segmentation/config_gan.json",
+            "export_json":  "backend/req_files//segmentation/Export_TF.json"
+        },
+        "objectdetection": {
+            "train_json": "backend/req_files/objectdetection/Training.json",
+            "test_json": "backend/req_files/objectdetection/Testing.json",
+            "eval_json": "backend/req_files/objectdetection/Evaluation.json",
+            "model_config_src": "backend/req_files/objectdetection/ModelConfig/",
+            "default_gan_config": "backend/req_files/objectdetection/config_gan.json",
+            "export_json":  "backend/req_files//objectdetection/Export_TF.json"
+        },
+        "dl_path": "D:/SEM_DL_Kit/Scripts/DLProcessWrapper2.4/DLProcessWrapper.exe"
+    },
+    "classes": [
+        "OK",
+        "NONE",
+        "RETEST"
+    ],
+    "non_ng_class": "OK",
+    "default_hyperparameters": {
+        "lr": 0.0001,
+        "batch_size": 64,
+        "epochs": 200
+    },
+    "Optuna_parameters": {
+        "n_trials": 6,
+        "trial_epoch": 20,
+        "epochs": 200
+    },
+    "FID_coeff":1.5,
+    "cleanlab_conf":0.95,
+    "Dev": {
+        "db_ip": "107.99.139.56",
+        "db_port": "3306",
+        "db_name": "gaudi_dev",
+        "username": "gaudi_user",
+        "password": "semco123",
+        "NAS": "Z:/GAUDIPROJECT",
+        "host_ip" : "107.99.131.58",
+        "host_port" : 8000,
+        "server_ip" : "107.99.131.58",
+        "server_port": 8001,
+        "map_server_port":7870,
+        "linux_path":"/gaudi/gaudi_code",
+        "java_ip":"16.3.55.161",
+        "java_port":8404,
+        "pado_system": {
+            "0": {
+                "gpu_index": 0,
+                "cpu_mem": 256,
+                "cpu_used": 0,
+                "mem_total": 90,
+                "mem_used": 0,
+                "mem_free": 90,
+                "gpu_name": "NVIDIA H100 PCIe",
+                "driver_version": "PADO_NVIDIA H100 PCIe",
+                "experiment_id": "42D9093E8F850CBCE06334044FA64076",
+                "project_id": "4223592BDB8D201AE06334044FA6CECC",
+                "CPU_core" : "9000m",
+                "ip": "16.3.49.30",
+                "port": "30080",
+                "user_api": "1B26783B679D72A2E06333044FA62AFFyrsaURrq"
+
+            }
+        },
+        "pado_port": [
+            
+        ]
+    },
+    "QC": {
+        "db_ip": "107.99.139.56",
+        "db_port": "3320",
+        "db_name": "gaudi_qc",
+        "username": "gaudi_qc_user",
+        "password": "semco123",
+        "NAS": "Z:/GAUDIPROJECT",
+        "host_ip" : "107.99.131.122",
+        "host_port" : 9000,
+        "server_ip" : "107.99.131.122",
+        "server_port": 9020,
+        "map_server_port":7870,
+        "linux_path":"/gaudi/gaudi_code",
+        "java_ip":"16.3.55.161",
+        "java_port":8404
+    },
+    "Dep_Linux": {
+        "db_ip": "16.3.55.161",
+        "db_port": "3306",
+        "db_name": "gaudi_stageprod",
+        "username": "gaudi_prod_user",
+        "password": "semco123",
+        "NAS": "D:/GAUDISTAGE/storage/GAUDIPROJECT",
+        "server_ip" : "0.0.0.0",
+        "server_port": 8411,
+        "map_server_ip": "16.3.55.248",
+        "map_server_port":7870,
+        "linux_path":"/gaudi/gaudi_code",
+        "java_ip":"16.3.55.161",
+        "java_port":8404,
+        "pado_system": {
+            "0": {
+                "gpu_index": 0,
+                "cpu_mem": 256,
+                "cpu_used": 0,
+                "mem_total": 90,
+                "mem_used": 0,
+                "mem_free": 90,
+                "gpu_name": "NVIDIA H100 PCIe",
+                "driver_version": "PADO_NVIDIA H100 PCIe",
+                "experiment_id": "42D9093E8F850CBCE06334044FA64076",
+                "project_id": "4223592BDB8D201AE06334044FA6CECC",
+                "CPU_core" : "9000m",
+                "ip": "16.3.49.30",
+                "port": "30080",
+                "user_api": "1B26783B679D72A2E06333044FA62AFFyrsaURrq"
+
+            }
+        },
+        "pado_port": [
+            
+        ]
+    },
+    "Dep_win": {
+        "db_ip": "16.3.55.161",
+        "db_port": "3306",
+        "db_name": "gaudi_stageprod",
+        "username": "gaudi_prod_user",
+        "password": "semco123",
+        "NAS": "D:/GAUDISTAGE/storage/GAUDIPROJECT",
+        "host_ip": "16.3.55.161",
+        "host_port": 8410,
+        "server_ip": "16.3.55.161",
+        "server_port": 8183,
+        "map_server_ip": "16.3.55.248",
+        "map_server_port": 7870,
+        "linux_path": "/gaudi/gaudi_code",
+        "java_ip": "16.3.55.161",
+        "java_port": 8404,
+        "pado_system": {
+            "0": {
+                "gpu_index": 0,
+                "cpu_mem": 10,
+                "cpu_used": 0,
+                "mem_total": 32,
+                "mem_used": 0,
+                "mem_free": 32,
+                "gpu_name": "PADO_GPU_1",
+                "driver_version": "PADO_NVIDIA V100 PCIe",
+                "experiment_id": "47CCDB21337435ACE06334044FA698F1",
+                "project_id": "4223592BDB8D201AE06334044FA6CECC",
+                "CPU_core" : "2000m",
+                "ip": "16.3.49.30",
+                "port": "30080",
+                "user_api": "1B26783B679D72A2E06333044FA62AFFyrsaURrq"
+
+            },
+            "1": {
+                "gpu_index": 0,
+                "cpu_mem": 256,
+                "cpu_used": 0,
+                "mem_total": 80,
+                "mem_used": 0,
+                "mem_free": 80,
+                "gpu_name": "PADO_GPU_2",
+                "driver_version": "PADO_NVIDIA H100 PCIe",
+                "experiment_id": "461FBAD214DFFA8CE06334044FA65015",
+                "project_id": "4223592BDB8D201AE06334044FA6CECC",
+                "CPU_core" : "9000m",
+                "ip": "16.3.49.30",
+                "port": "30080",
+                "user_api": "1B26783B679D72A2E06333044FA62AFFyrsaURrq"
+
+            }
+        },
+        "pado_port": [
+            8183
+        ]
+    },
+    "Dep2_win": {
+        "db_ip": "16.3.55.161",
+        "db_port": "3306",
+        "db_name": "gaudi_hqprod",
+        "username": "gaudi_hqprod_user",
+        "password": "semco321",
+        "NAS": "D:/GAUDIHQPROD/storage/GAUDIPROJECT",
+        "host_ip" : "16.3.55.161",
+        "host_port" : 8001,
+        "server_ip" : "16.3.55.161",
+        "server_port": 8181,
+        "map_server_ip": "16.3.55.248",
+        "map_server_port":1510,
+        "linux_path":"/gaudi/gaudi_code",
+        "java_ip":"16.3.55.161",
+        "java_port":8602
+    },
+    "Dep2_Linux": {
+        "db_ip": "16.3.55.161",
+        "db_port": "3306",
+        "db_name": "gaudi_hqprod",
+        "username": "gaudi_hqprod_user",
+        "password": "semco321",
+        "NAS": "D:/GAUDIHQPROD/storage/GAUDIPROJECT",
+        "host_ip" : "16.3.55.161",
+        "host_port" : 8001,
+        "server_ip" : "0.0.0.0",
+        "server_port": 8003,
+        "map_server_ip": "16.3.55.248",
+        "map_server_port":1511,
+        "linux_path":"/gaudi/gaudi_code",
+        "java_ip":"16.3.55.161",
+        "java_port":8602
+}
+}

@@ -1,0 +1,19 @@
+{
+  "ANNOTATIONS": [
+    {
+      "ImagePath": "\\\\107.108.32.106\\pratik\\pratik\\SuwonOffice_dataset\\Plato_dataset\\PSMT dataset\\YOLO_\\images\\092f4233-NotDetected_4.bmp",
+      "MaskPath": "C:\\Program Files\\Samsung Electro-Mechanics\\SEM DL Kit\\SEM_DL_Kit\\obj\\Annotation\\txtfiles\\092f4233-NotDetected_4.txt",
+      "Points": null,
+      "ImgW": 4096,
+      "ImgH": 3000
+    },
+    {
+      "ImagePath": "\\\\107.108.32.106\\pratik\\pratik\\SuwonOffice_dataset\\Plato_dataset\\PSMT dataset\\YOLO_\\images\\0b82a601-134.bmp",
+      "MaskPath": "C:\\Program Files\\Samsung Electro-Mechanics\\SEM DL Kit\\SEM_DL_Kit\\obj\\Annotation\\txtfiles\\0b82a601-134.txt",
+      "Points": null,
+      "ImgW": 4096,
+      "ImgH": 3000
+    }
+
+  ]
+}

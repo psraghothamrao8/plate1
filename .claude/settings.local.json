@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"print\\('check py available'\\)\")",
+      "Bash(python -V)",
+      "Bash(xargs grep -l \"One or both input files do not exist\")",
+      "Bash(awk 'NR==1117,NR==1346' \"C:\\\\Users\\\\Admin\\\\Documents\\\\plato\\\\automl_pipeline.py\")"
+    ]
+  }
+}

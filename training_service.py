@@ -1269,12 +1269,47 @@ def scan_dataset_and_update_configs_seg(
 # and the top-level Datasets list (both reference dataset name "d" == "d.json" resolved in
 # the same directory as the JSON file itself). Training.json has no such pointer — it picks
 # up Input_Train.json/Input_Val.json from its own folder by fixed filename.
+#
+# Points format (per image entry): a list of per-object dicts, one per line in the
+# annotation .txt file —
+#     {"CId": "<class index as string>", "X": [x1, x2, x3, x4], "Y": [y1, y2, y3, y4]}
+# with X/Y holding the 4 OBB corner coordinates in absolute pixel space (not normalized).
+# The source .txt referenced by model_bbox_url is a standard YOLO-OBB label file —
+#     class_index x1 y1 x2 y2 x3 y3 x4 y4
+# with all 8 coordinates normalized to [0, 1] relative to image width/height — so
+# de-normalizing means x_abs = x_norm * ImgW, y_abs = y_norm * ImgH.
+def _parse_yolo_obb_txt(txt_path: Optional[str], img_w, img_h) -> List[Dict]:
+    """Parse a YOLO-OBB label .txt file into absolute-pixel Points entries."""
+    points: List[Dict] = []
+    if not txt_path or not os.path.exists(txt_path):
+        return points
+    try:
+        with open(txt_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 9:
+                    continue
+                cls_id = parts[0]
+                xs_norm = [float(parts[i]) for i in (1, 3, 5, 7)]
+                ys_norm = [float(parts[i]) for i in (2, 4, 6, 8)]
+                points.append({
+                    "CId": str(cls_id),
+                    "X":   [round(x * img_w, 2) for x in xs_norm],
+                    "Y":   [round(y * img_h, 2) for y in ys_norm],
+                })
+    except Exception as exc:
+        logger.warning(f"Failed to parse OBB label file {txt_path}: {exc}")
+    return points
+
+
 def csv_scan_objdet_annotations(
     csv_path: str,
 ) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict], List[Dict], List[Dict]]:
     """Read train_dataset.csv and build ANNOTATIONS-format entries (ImagePath/MaskPath/
-    Points/ImgW/ImgH) split into base/new x train/val/test buckets, mirroring csv_scan_seg_images
-    but keyed off `model_bbox_url` (annotation .txt path) instead of `model_mask_url`.
+    Rect/Points/ImgW/ImgH) split into base/new x train/val/test buckets, mirroring
+    csv_scan_seg_images. `model_bbox_url` points at the YOLO-OBB label .txt for the image;
+    its content is parsed and embedded as absolute-pixel Points (MaskPath itself is not
+    carried into the output — only used here to locate the label file).
     """
     df = pd.read_csv(csv_path)
     base_train, base_val, base_test = [], [], []
@@ -1285,8 +1320,9 @@ def csv_scan_objdet_annotations(
         width, height = _read_image_dimensions(row.image_url)
         entry = {
             "ImagePath": row.image_url,
-            "MaskPath":  bbox_path,
-            "Points":    None,
+            "MaskPath":  None,
+            "Rect":      [],
+            "Points":    _parse_yolo_obb_txt(bbox_path, width, height),
             "ImgW":      width,
             "ImgH":      height,
         }

@@ -15,6 +15,11 @@ This exists to round-trip csv_scan_objdet_annotations()/_parse_yolo_obb_txt(): r
 forward pipeline on some CSV, run this script on its JSON output, then run the forward
 pipeline again and diff the two JSON outputs.
 
+Rect is intentionally ignored on this reverse pass: it is derived data (the axis-aligned
+integer-string bbox of each Points entry) that the forward pipeline re-derives from
+Points via _rect_from_points(), so diffing two forward-pass JSON outputs validates Rect
+along with everything else.
+
 class_type/class_label are NOT present anywhere in the ANNOTATIONS JSONs (that info only
 ever lived in the original CSV, not the dataset descriptor files), so they're filled in
 with a fixed placeholder value here — good enough for round-tripping the dataset-generation

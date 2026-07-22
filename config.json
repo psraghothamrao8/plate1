@@ -1,30 +1,32 @@
 {
     "paths": {
         "classification": {
-            "train_json": "backend/req_files/classification/Training.json",
-            "test_json": "backend/req_files/classification/Testing.json",
-            "eval_json": "backend/req_files/classification/Evaluation.json",
+            "train_json": "backend/req_files/classification/model/Train/Model_1/Training.json",
+            "test_json": "backend/req_files/classification/model/Test/Model_1/Testing.json",
+            "eval_json": "backend/req_files/classification/model/Train/Model_1/Evaluation.json",
             "model_config_src": "backend/req_files/classification/ModelConfig/",
             "default_gan_config": "backend/req_files//classification/config_gan.json",
-            "export_json":  "backend/req_files//classification/Export_TF.json"
+            "export_json":  "backend/req_files/classification/model/Train/Model_1/Export_TF.json",
+            "dl_path": "D:/SEM_DL_Kit/Scripts/DLProcessWrapper2.4/DLProcessWrapper.exe"
         },
         "segmentation": {
-            "train_json": "backend/req_files/segmentation/Training.json",
-            "test_json": "backend/req_files/segmentation/Testing.json",
-            "eval_json": "backend/req_files/segmentation/Evaluation.json",
+            "train_json": "backend/req_files/segmentation/model/Train/Model_1/Training.json",
+            "test_json": "backend/req_files/segmentation/model/Test/Model_1/Testing.json",
+            "eval_json": "backend/req_files/segmentation/model/Train/Model_1/Evaluation.json",
             "model_config_src": "backend/req_files/segmentation/ModelConfig/",
             "default_gan_config": "backend/req_files/segmentation/config_gan.json",
-            "export_json":  "backend/req_files//segmentation/Export_TF.json"
+            "export_json":  "backend/req_files/segmentation/model/Train/Model_1/Export_TF.json",
+            "dl_path": "D:/SEM_DL_Kit/Scripts/DLProcessWrapper2.4/DLProcessWrapper.exe"
         },
         "objectdetection": {
-            "train_json": "backend/req_files/objectdetection/Model/Train/Training.json",
-            "test_json": "backend/req_files/objectdetection/Model/Test/Testing.json",
-            "eval_json": "backend/req_files/objectdetection/Model/Train/Evaluation.json",
+            "train_json": "backend/req_files/objectdetection/model/Train/Model_1/Training.json",
+            "test_json": "backend/req_files/objectdetection/model/Test/Model_1/Testing.json",
+            "eval_json": "backend/req_files/objectdetection/model/Train/Model_1/Evaluation.json",
             "model_config_src": "backend/req_files/objectdetection/ModelConfig/",
             "default_gan_config": "backend/req_files/objectdetection/config_gan.json",
-            "export_json":  "backend/req_files//objectdetection/Export_TF.json"
-        },
-        "dl_path": "D:/SEM_DL_Kit/Scripts/DLProcessWrapper2.4/DLProcessWrapper.exe"
+            "export_json":  "backend/req_files/objectdetection/model/Train/Model_1/Export_PT.json",
+            "dl_path": "D:/SEM_DL_Kit/Scripts_PT/dl_pt_wrapper/dl_pt_wrapper.exe"
+        }
     },
     "classes": [
         "OK",

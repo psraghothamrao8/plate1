@@ -53,7 +53,11 @@ ACCURACY_GAN_THRESHOLD = 0.9
 MAX_ANALYSE_CYCLES = 4
 FID_COEFFICIENT= _APP_CONFIG['FID_coeff']
 CLEANLAB_CONF = _APP_CONFIG['cleanlab_conf']
-
+DEBUG_MODE = _APP_CONFIG['DEBUG_MODE']
+DEBUG_EPOCHS = _APP_CONFIG['DEBUG_EPOCHS']
+DEBUG_IMPROVED = True
+if DEBUG_MODE:
+    DEBUG_IMPROVED = False
 
 def _json_path(job: dict) -> Path:
     return (Path(job['config']["storage_path"]) / job['job'] / job['config']["triggerId"] / "Doc" / "data.json")
@@ -348,6 +352,7 @@ def api_GAN(gan_config_path: str, gan_source: str, v_path: str, status=26) -> st
     try:
         best_result_path = Train(payload).process()
     except Exception as err:
+        process_logger.error(f"NODE:88, Error in api_GAN function: {err}")
         raise
     return v_path, best_result_path
 
@@ -363,7 +368,7 @@ def api_analyse(file_path: str, csv_out: str) -> Dict[str, Any]:
         result = analyze_situation_and_decide(file_path, csv_out, CLEANLAB_CONF)
 
     except Exception as e:
-        process_logger.error("NODE:88, data analysis error")
+        process_logger.error(f"NODE:88, data analysis error: {e}")
         raise
     return result
 
@@ -457,6 +462,32 @@ def get_latest_model_name(storage_root):
                 pass
     return f"Model_{max_num}" if max_num > 0 else "Model_1"
 
+def _move_loose_items_into_model_dir(container_dir, model_dir):
+    """If a template ships files directly under Train/ or Test/ (no Model_N/
+    subfolder — e.g. objectdetection's Test/), relocate them into .../Model_1/ so the
+    layout matches classification/segmentation templates, which already nest everything
+    under Model_1/. Must run before anything does shutil.copy2(..., model_dir): if
+    model_dir doesn't exist yet as a directory, copy2 treats it as a destination
+    *filename* instead and silently creates a file where a folder was expected."""
+    if not os.path.exists(container_dir):
+        return
+    os.makedirs(model_dir, exist_ok=True)
+    for item in os.listdir(container_dir):
+        if item.startswith("Model_"):
+            continue
+        src_path = os.path.join(container_dir, item)
+        dst_path = os.path.join(model_dir, item)
+        if not os.path.exists(dst_path):
+            if os.path.isfile(src_path):
+                shutil.copy2(src_path, dst_path)
+            elif os.path.isdir(src_path):
+                shutil.copytree(src_path, dst_path)
+        if os.path.isfile(src_path):
+            os.remove(src_path)
+        elif os.path.isdir(src_path):
+            shutil.rmtree(src_path)
+
+
 def setup_model_directories(storage_root, import_files, task_type="classification"):
     try:
         if import_files and os.path.isfile(import_files):
@@ -467,61 +498,65 @@ def setup_model_directories(storage_root, import_files, task_type="classificatio
         test_model_dir = os.path.join(model_root, "Test", "Model_1")
         req_model_dir = os.path.join("backend", "req_files", task_type.lower(), "model")
         shutil.copytree(req_model_dir, model_root, dirs_exist_ok=True)
-        # Move any files/dirs that landed at Train/ level into Train/Model_1/ where they belong
-        train_dir = os.path.join(model_root, "Train")
-        if os.path.exists(train_dir):
-            os.makedirs(train_model_dir, exist_ok=True)
-            for item in os.listdir(train_dir):
-                if item.startswith("Model_"):
-                    continue
-                src_path = os.path.join(train_dir, item)
-                dst_path = os.path.join(train_model_dir, item)
-                if not os.path.exists(dst_path):
-                    if os.path.isfile(src_path):
-                        shutil.copy2(src_path, dst_path)
-                    elif os.path.isdir(src_path):
-                        shutil.copytree(src_path, dst_path)
-                if os.path.isfile(src_path):
-                    os.remove(src_path)
-                elif os.path.isdir(src_path):
-                    shutil.rmtree(src_path)
+        # Move any files/dirs that landed at Train/ or Test/ level into Model_1/ where
+        # they belong (no-op for classification/segmentation, whose templates already
+        # nest everything under Model_1/).
+        _move_loose_items_into_model_dir(os.path.join(model_root, "Train"), train_model_dir)
+        _move_loose_items_into_model_dir(os.path.join(model_root, "Test"), test_model_dir)
         if not import_files or not os.path.exists(import_files):
             process_logger.error("NODE:88, Please import a valid frontier model...")
             return 
         shutil.copytree(import_files, import_model_dir, dirs_exist_ok=True)
         shutil.copytree(import_model_dir, train_model_dir, dirs_exist_ok=True)
-        # net.json lives in Train/Model_N/ModelConfig/ of the source model.
+        # The net config lives in Train/Model_N/ModelConfig/ of the source model.
         # When import_files is Exported_model/, go up to the parent model dir to find it.
         parent_model_dir = os.path.dirname(import_files)
         imported_model_name = get_latest_model_name(parent_model_dir)
-        # For segmentation: prefer the original trained H5 over the exported copy so
-        # baseline inference uses the same weights as base training inference did.
-        src_h5 = os.path.join(parent_model_dir, "Train", imported_model_name, "model_best_epoch.h5")
-        if not os.path.exists(src_h5):
-            src_h5 = os.path.join(import_model_dir, "model_best_epoch.h5")
-        shutil.copy2(src_h5, test_model_dir)
-        shutil.copy2(src_h5, train_model_dir)
-        net_json = os.path.join(import_files, "net.json")
-        if not os.path.exists(net_json):
-            net_json = os.path.join(parent_model_dir, "Train", imported_model_name, "ModelConfig", "net.json")
-        if os.path.exists(net_json):
+        # Object detection models are PyTorch: best_weights.pth + net.yaml.
+        # Classification/segmentation models are Keras: model_best_epoch.h5 + net.json.
+        is_objdet = task_type.lower() == "objectdetection"
+        weights_name = "best_weights.pth" if is_objdet else "model_best_epoch.h5"
+        net_name = "net.yaml" if is_objdet else "net.json"
+        # Prefer the original trained weights over the exported copy so baseline
+        # inference uses the same weights as base training inference did.
+        src_weights = os.path.join(parent_model_dir, "Train", imported_model_name, weights_name)
+        if not os.path.exists(src_weights):
+            src_weights = os.path.join(import_model_dir, weights_name)
+        shutil.copy2(src_weights, test_model_dir)
+        shutil.copy2(src_weights, train_model_dir)
+        net_file = os.path.join(import_files, net_name)
+        if not os.path.exists(net_file):
+            net_file = os.path.join(parent_model_dir, "Train", imported_model_name, "ModelConfig", net_name)
+        if os.path.exists(net_file):
             for mc_dst in [os.path.join(train_model_dir, "ModelConfig"),
                            os.path.join(test_model_dir, "ModelConfig")]:
                 os.makedirs(mc_dst, exist_ok=True)
-                shutil.copy2(net_json, mc_dst)
+                shutil.copy2(net_file, mc_dst)
         else:
-            process_logger.error(f"NODE:88, net.json not found at {net_json} - ModelConfig will be incomplete")
+            process_logger.error(f"NODE:88, {net_name} not found at {net_file} - ModelConfig will be incomplete")
         return
     except Exception as e:
         process_logger.error(f"NODE:88, Model setup failed: {e}")
         raise e
     
 
+def _resolve_task_template(json_path):
+    """These config.json-listed templates are static (opened by exact filename, no
+    Model_N versioning) and normally sit flat — but tolerate a Model_1/ subfolder too,
+    in case someone applies the runtime model scaffold's Model_N/ nesting convention
+    here by mistake. Falls back to the original flat path if neither exists, so a
+    genuinely missing template still errors with the expected canonical path."""
+    if os.path.exists(json_path):
+        return json_path
+    nested = os.path.join(os.path.dirname(json_path), "Model_1", os.path.basename(json_path))
+    return nested if os.path.exists(nested) else json_path
+
+
 def frontier_changes_(new_classes, storage_root, label: Optional[str] = None, task_type: str = "classification", analysis=False, gan=False):
     task_cfg = _task_paths(task_type)
-    train_json = task_cfg["train_json"]
-    test_json = task_cfg["test_json"]
-    eval_json = task_cfg["eval_json"]
+    train_json = _resolve_task_template(task_cfg["train_json"])
+    test_json = _resolve_task_template(task_cfg["test_json"])
+    eval_json = _resolve_task_template(task_cfg["eval_json"])
     model_config_src = task_cfg["model_config_src"]
 
     # frontier_dir = os.path.join(storage_root, "modelConfig", "model")
@@ -632,11 +667,12 @@ def _analyse_and_pause_(job=None,
     return saved_csv
 
 def initialize(job=None, hyperparameters=None):
+    
     cfg = job['config']
     storage_root = os.path.join(cfg["storage_path"], job['job'], cfg["triggerId"])
     doc_dir = os.path.join(storage_root, "Doc")
     os.makedirs(doc_dir, exist_ok=True) 
-
+    
     try:
         dataset_csv_path = cfg['dataset_csv_path']
     except:
@@ -647,6 +683,8 @@ def initialize(job=None, hyperparameters=None):
     process_logger.configure_logger(path=doc_dir, trigger_id=cfg['triggerId'],
                                     filename=f"{cfg['triggerId']}.log")
     process_logger.progress(1.0)
+    print(f"{'*'*10} Job starting with DEBUG MODE: {DEBUG_MODE} and DEBUG IMPROVED: {DEBUG_IMPROVED} {'*'*10}")
+    process_logger.info(f"NODE:11, DEBUG MODE: {DEBUG_MODE} and DEBUG_IMPROVED: {DEBUG_IMPROVED}")
 
     task_type = job["job"].lower()
     hparams = hyperparameters or DEFAULT_HYPERPARAMS
@@ -707,7 +745,7 @@ def run_training_with_gan(
     
     export_save_path = api_export_model(storage_root=frontier_dir, training_type=task_type, status=34, label="GAN_trained")
 
-    if improved:
+    if improved and DEBUG_IMPROVED:
         res         = f"{best_acc:.4f}" if best_acc is not None else "N/A"
         miss_res    = f"{best_miss_rate:.4f}" if best_miss_rate is not None else "N/A"
         ok_res      = f"{best_overkill_rate:.4f}" if best_overkill_rate is not None else "N/A"
@@ -727,7 +765,7 @@ def run_training_with_gan(
         return
     else:
         process_logger.info("NODE:34,  No improvement with GAN generated dataset")
-        process_logger.info(f"NODE:35, Accuracy < Target — Analysis workflow, cycle 1/{MAX_ANALYSE_CYCLES}")
+        process_logger.info(f"NODE:35, Accuracy < Target - Analysis workflow, cycle 1/{MAX_ANALYSE_CYCLES}")
         _analyse_and_pause_(job, doc_dir, dataset_csv_path, cycle_num=1, status=35)
         return
 
@@ -785,7 +823,7 @@ def run_training_with_analysis(job=None,
     store_json(job, f"New_Test-NODE:{num_ + 4}", new_test_inf)
     export_save_path =api_export_model(storage_root=frontier_dir, training_type=task_type, status=num_ + 4, label=f"{cycle_num}_Cleanlab_trained")
 
-    if improved:
+    if improved and DEBUG_IMPROVED:
         res         = f"{best_acc:.4f}" if best_acc is not None else "N/A"
         miss_res    = f"{best_miss_rate:.4f}" if best_miss_rate is not None else "N/A"
         ok_res      = f"{best_overkill_rate:.4f}" if best_overkill_rate is not None else "N/A"
@@ -857,7 +895,8 @@ def run_segmentation_retry(job=None,
     store_json(job, "New_Test-NODE:44", new_test_inf)
 
     export_save_path = api_export_model(storage_root=frontier_dir, training_type=task_type, status=44, label="manual_mask_correction")
-    if improved:
+
+    if improved and DEBUG_IMPROVED:
         res = f"{best_acc:.4f}" if best_acc is not None else "N/A"
         process_logger.info(f"NODE:44, Best MIoU: {res}")
         improved_path = os.path.join(os.path.dirname(export_save_path), "improved")
@@ -1000,7 +1039,7 @@ def run_gan_worflow(job=None,
                     storage_root=None,
                     dataset_csv_path=None,
                     doc_dir=None):
-    process_logger.info("NODE:25, Accuracy >= Target so Starting — GAN workflow")
+    process_logger.info("NODE:25, Accuracy >= Target so Starting - GAN workflow")
     process_logger.info("NODE:25, Finding similar data for GAN training..")
     try:    
         miss_flag = validate_dataset(file_path=miss_csv, data_type='miss')
@@ -1046,7 +1085,7 @@ def run_gan_worflow(job=None,
         process_logger.info(f"NODE:26, Cluster result path - {result_path}")
     except Exception as e:
         print(f"Error in cluster creation: {e}")
-        process_logger.info(f"NODE:26, Clustering failed.")
+        process_logger.info(f"NODE:26, Clustering failed: {e}")
         process_logger.error(f"NODE:88, Clustering failed.")
         raise
     process_logger.info(f"NODE:27, Classes Cluster path: {result_path}")
@@ -1059,9 +1098,10 @@ def run_gan_worflow(job=None,
                                                     storage_folder=storage_root)
     except Exception as e:
         print(f"Error in fid calculation: {e}")
-        process_logger.info(f"NODE:27, FID calculation failed.")
+        process_logger.info(f"NODE:27, FID calculation failed: {e}")
         process_logger.error(f"NODE:88, FID calculation failed.")
         raise
+    
     store_json(job, "BASE_FID_Score", base_fid)
     store_json(job, "GAN_FID_Score", gan_fid)
     process_logger.info(f"NODE:27, BASE FID score - {base_fid} and GAN FID score - {gan_fid}")
@@ -1077,7 +1117,7 @@ def run_gan_worflow(job=None,
 
         except Exception as e:
             print(f"Error in api validator: {e}")
-            process_logger.info(f"NODE:27, API validator failed.")
+            process_logger.info(f"NODE:27, API validator failed: {e}")
             process_logger.error(f"NODE:88, API validator failed.")
             raise
         store_json(job, "validator_data", validator_result)
@@ -1087,7 +1127,7 @@ def run_gan_worflow(job=None,
         return
     else:
         process_logger.info(f"NODE:27, GAN FID score - {gan_fid} > BASE FID * 1.5 ({1.5 * base_fid})")
-        process_logger.info(f"NODE:35, Accuracy < Target — Analysis workflow, cycle 1/{MAX_ANALYSE_CYCLES}")
+        process_logger.info(f"NODE:35, Accuracy < Target - Analysis workflow, cycle 1/{MAX_ANALYSE_CYCLES}")
         _analyse_and_pause_(job, doc_dir, dataset_csv_path, cycle_num=1, status=25)
         return
 def export_conf_files(storage_root=None, label=None, which_data=None, task_type="classification"):
@@ -1188,13 +1228,14 @@ def run_model_improvement(job=None,
     _cfg = hparams or {}
     base_hparams = {
         'lr':         model_fields.get('fBaseLR',   _cfg.get('lr',         0.0001)),
-        'epochs':     model_fields.get('epochs',    _cfg.get('epochs',     100)),
+        'epochs':     model_fields.get('epochs',    _cfg.get('epochs',     100)) if not DEBUG_MODE else DEBUG_EPOCHS,
         'batch_size': model_fields.get('iBatchSize', _cfg.get('batch_size', 4)),
         'valRatio':   model_fields.get('valRatio',  _cfg.get('valRatio',   20)),
         'minEpoch':   model_fields.get('minEpoch',  _cfg.get('minEpoch',   0)),
         'patience':   model_fields.get('patience',  _cfg.get('patience',   50)),
         'fLRDecay':   model_fields.get('fLRDecay',  _cfg.get('fLRDecay',   0.5))
     }
+    print(f"{'*'*20} Base_hparams values: {base_hparams}")
     api_train(dataset_csv_path=dataset_csv_path, hyperparameters=base_hparams, storage_root=frontier_dir, label="Round 1", status=12, training_type=task_type)
     process_logger.info("NODE:12, Model Training Completed & model Saved")
     process_logger.progress(60.0)
@@ -1220,7 +1261,7 @@ def run_model_improvement(job=None,
     process_logger.progress(65.0)
     export_save_path = api_export_model(storage_root=frontier_dir, training_type=task_type, status=14, label="Base_param")
 
-    if improved:
+    if improved and DEBUG_IMPROVED:
         acc_label = "MIoU" if task_type == "segmentation" else "Accuracy"
         res = f"{best_acc:.4f}" if best_acc is not None else "N/A"
         process_logger.info(f"NODE:14, Best {acc_label}: {res}")
@@ -1318,7 +1359,7 @@ def run_model_improvement(job=None,
     store_json(job, "New_Test-NODE:24", new_test_inf2)
     export_save_path =  api_export_model(storage_root=frontier_dir, training_type=task_type, status=24, label="Hyper_param")
 
-    if improved_vs_best:
+    if improved_vs_best and DEBUG_IMPROVED:
         acc_label = "MIoU" if task_type == "segmentation" else "Accuracy"
         res = f"{best_acc:.4f}" if best_acc is not None else "N/A"
         process_logger.info(f"NODE:24, Best {acc_label}: {res}")
@@ -1413,7 +1454,7 @@ def run_pipeline(job: dict, hyperparameters: Optional[Dict[str, Any]] = None) ->
             process_logger.error(f"NODE:88, Issue in run_model_improvement: {e}")
             raise
         
-        if improved:
+        if improved and DEBUG_IMPROVED:
             return
         
         latest_miss_rate, latest_overkill_rate = extract_miss_overkill(inf2)
@@ -1432,9 +1473,9 @@ def run_pipeline(job: dict, hyperparameters: Optional[Dict[str, Any]] = None) ->
                 print(f"Error in run_gan_worflow: {e}")
                 process_logger.error(f"NODE:88, Issue in run_gan_worflow {e}")
                 raise
-        elif task_type == "segmentation": 
+        elif task_type in ("segmentation", "objectdetection"):
             process_logger.progress(100.0)
-            return 
+            return
         else:
             process_logger.info(f"NODE:25, Accuracy < Target — Analysis workflow, cycle 1/{MAX_ANALYSE_CYCLES}")
             _analyse_and_pause_(job, doc_dir, dataset_csv_path, cycle_num=1, status=25)
@@ -1611,31 +1652,31 @@ def run_pipeline(job: dict, hyperparameters: Optional[Dict[str, Any]] = None) ->
     # if not os.path.exists(storage_root):
     #     os.makedirs(storage_root)
     # gan_path, best_result_path = api_GAN(gan_config, first_path, v_path=storage_root, status=26)
+# 
+if __name__ == "__main__":
+    job = {
+        "server_ip": "107.99.131.65",
+        "server_port": 9000,
+        "backend_ip": "107.99.131.65",
+        "backend_port": 8011,
+        "trigger_id": "ALERT_M11_M12",
+        "config": {
+            "triggerId": "Plato_9060_rohit9",
+            "Base_training": False,
+            "modelConfig": "Z:/PLATO/Objectdetection/Plato_1201112/model/Imported_model",
+            "dataset_csv_path": "Z:/PLATO/Objectdetection/Plato_1201112/train_dataset.csv",
+            "storage_path": "Z:/PLATO",
+            "status": [0],
+        },
+        "gpu_id": 859,
+        "gpu_no": 0,
+        "job": "Objectdetection",
+        "job_type": "gpu",
+        "logs": "Job assigned.",
+        "progress": 0.0,
+        "error": None,
+        "allowNextJob": False,
+        "system_id": 910,
+    }
 
-# if __name__ == "__main__":
-#     job = {
-#         "server_ip": "107.99.131.65",
-#         "server_port": 9000,
-#         "backend_ip": "107.99.131.65",
-#         "backend_port": 8011,
-#         "trigger_id": "ALERT_M11_M12",
-#         "config": {
-#             "triggerId": "Plato_9060_rohit4",
-#             "Base_training": False,
-#             "modelConfig": "Z:/PLATO/Classification/Plato_1201112/model/Imported_model",
-#             "dataset_csv_path": "Z:/PLATO/Classification/Plato_1201112/train_dataset.csv",
-#             "storage_path": "Z:/PLATO",
-#             "status": [0],
-#         },
-#         "gpu_id": 859,
-#         "gpu_no": 0,
-#         "job": "Classification",
-#         "job_type": "gpu",
-#         "logs": "Job assigned.",
-#         "progress": 0.0,
-#         "error": None,
-#         "allowNextJob": False,
-#         "system_id": 910,
-#     }
-
-#     run_pipeline(job=job)
+    run_pipeline(job=job)

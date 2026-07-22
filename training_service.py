@@ -8,7 +8,7 @@ import pandas as pd
 import torch.nn as nn
 import torch.optim as optim
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple, Set
+from typing import Optional, List, Dict, Tuple, Set, Union
 import torchvision.models as models
 import numpy as np
 from torch.utils.data import DataLoader
@@ -31,9 +31,7 @@ json_path = os.path.join(os.getcwd(), 'backend/config.json')
 with open(json_path, 'r',encoding="utf-8") as json_file:
     json_data = json.load(json_file)
 
-DL_PROCESS_WRAPPER_PATH = json_data['paths']['dl_path']
 _DEFAULT_HPARAMS = json_data.get("default_hyperparameters", {})
-# print("DL PATH: ", DL_PROCESS_WRAPPER_PATH)
 
 logger = setup_logger("pluto_trainer", os.path.join(LOGS_DIR, "startup.log"), mode='a')
 
@@ -58,8 +56,8 @@ _BACKEND_DIR  = os.path.dirname(_SERVICES_DIR)
 CLASSIFICATION_TEMPLATE_DIR = os.path.join(_BACKEND_DIR, "req_files", "classification")
 SEGMENTATION_TEMPLATE_DIR   = os.path.join(_BACKEND_DIR, "req_files", "segmentation")
 OBJECTDETECTION_TEMPLATE_DIR       = os.path.join(_BACKEND_DIR, "req_files", "objectdetection")
-OBJECTDETECTION_TRAIN_TEMPLATE_DIR = os.path.join(OBJECTDETECTION_TEMPLATE_DIR, "Model", "Train")
-OBJECTDETECTION_TEST_TEMPLATE_DIR  = os.path.join(OBJECTDETECTION_TEMPLATE_DIR, "Model", "Test")
+OBJECTDETECTION_TRAIN_TEMPLATE_DIR = os.path.join(OBJECTDETECTION_TEMPLATE_DIR, "model", "Train")
+OBJECTDETECTION_TEST_TEMPLATE_DIR  = os.path.join(OBJECTDETECTION_TEMPLATE_DIR, "model", "Test")
 
 
 # ----------------------------------------------------------------------
@@ -122,15 +120,25 @@ def dump_json(data: Dict, path: str) -> bool:
         return False
 
 
+def _find_template_source(base_dir: str, template_name: str) -> Optional[str]:
+    """Locate a static per-task-type template by name. These templates are opened by
+    exact name (no Model_N versioning) and normally sit flat in base_dir, but tolerate
+    a Model_1/ subfolder too, since that convention is otherwise only used for the
+    trained-weight scaffold, not for these fixed templates."""
+    candidates = [
+        os.path.join(base_dir, template_name.lower()),
+        os.path.join(base_dir, template_name),
+        os.path.join(base_dir, "Model_1", template_name),
+        os.path.join(base_dir, "Model_1", template_name.lower()),
+    ]
+    return next((c for c in candidates if os.path.exists(c)), None)
+
+
 def ensure_json_from_template(target_path: str, template_name: str, base_dir: str) -> bool:
     """Copy template to target_path if target doesn't exist. Returns True when ready."""
     if os.path.exists(target_path):
         return True
-    candidates = [
-        os.path.join(base_dir, template_name.lower()),
-        os.path.join(base_dir, template_name),
-    ]
-    src = next((c for c in candidates if os.path.exists(c)), None)
+    src = _find_template_source(base_dir, template_name)
     if src is None:
         logger.error(f"Template {template_name} not found in {base_dir}")
         return False
@@ -518,7 +526,7 @@ def csv_scan_dataset_and_update_configs(
     #     return False
     imported_json = os.path.join(storage_root, "Imported_model", "Training.json")
     if os.path.exists(imported_json):
-        with open(imported_json) as f:
+        with open(imported_json, encoding="utf-8") as f:
             source_data = json.load(f)
         
         classes = [item['ClassName'] for item in source_data['classlst']]
@@ -621,7 +629,7 @@ def inf_csv_scan_dataset_and_update_configs(
     # classes = discover_classes(train_dir)
     imported_json = os.path.join(storage_root, "Imported_model", "Training.json")
     if os.path.exists(imported_json):
-        with open(imported_json) as f:
+        with open(imported_json,encoding="utf-8") as f:
             source_data = json.load(f)
         classes = [item['ClassName'] for item in source_data['classlst']]
     else:
@@ -1278,6 +1286,12 @@ def scan_dataset_and_update_configs_seg(
 #     class_index x1 y1 x2 y2 x3 y3 x4 y4
 # with all 8 coordinates normalized to [0, 1] relative to image width/height — so
 # de-normalizing means x_abs = x_norm * ImgW, y_abs = y_norm * ImgH.
+#
+# Rect format (per image entry): a list parallel to Points, one axis-aligned bounding
+# rect per object: {"X", "Y", "W", "H", "CId"} with X/Y/W/H as integer strings in
+# absolute pixels (X/Y = top-left corner of the upright box enclosing the OBB corners,
+# W/H = its extent). Values may be negative and are never clamped to the image bounds;
+# CId matches the corresponding Points entry.
 def _parse_yolo_obb_txt(txt_path: Optional[str], img_w, img_h) -> List[Dict]:
     """Parse a YOLO-OBB label .txt file into absolute-pixel Points entries."""
     points: List[Dict] = []
@@ -1302,6 +1316,28 @@ def _parse_yolo_obb_txt(txt_path: Optional[str], img_w, img_h) -> List[Dict]:
     return points
 
 
+def _rect_from_points(points: List[Dict]) -> List[Dict]:
+    """Derive the axis-aligned bounding rect for each OBB Points entry, in the
+    DLProcessWrapper Rect format: {"X","Y","W","H","CId"}, X/Y/W/H as integer strings
+    in absolute pixels (may be negative; never clamped to the image). Edges are
+    rounded independently, so X == round(min X) and X + W == round(max X) exactly.
+    Returns a list parallel to `points`."""
+    rects: List[Dict] = []
+    for obj in points:
+        xs = obj.get("X") or [0.0]
+        ys = obj.get("Y") or [0.0]
+        x0, x1 = int(round(min(xs))), int(round(max(xs)))
+        y0, y1 = int(round(min(ys))), int(round(max(ys)))
+        rects.append({
+            "X":   str(x0),
+            "Y":   str(y0),
+            "W":   str(x1 - x0),
+            "H":   str(y1 - y0),
+            "CId": str(obj.get("CId", "0")),
+        })
+    return rects
+
+
 def csv_scan_objdet_annotations(
     csv_path: str,
 ) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict], List[Dict], List[Dict]]:
@@ -1309,7 +1345,9 @@ def csv_scan_objdet_annotations(
     Rect/Points/ImgW/ImgH) split into base/new x train/val/test buckets, mirroring
     csv_scan_seg_images. `model_bbox_url` points at the YOLO-OBB label .txt for the image;
     its content is parsed and embedded as absolute-pixel Points (MaskPath itself is not
-    carried into the output — only used here to locate the label file).
+    carried into the output — only used here to locate the label file). Rect is the
+    axis-aligned integer-string bbox derived per object from Points (parallel lists,
+    see _rect_from_points).
     """
     df = pd.read_csv(csv_path)
     base_train, base_val, base_test = [], [], []
@@ -1318,11 +1356,12 @@ def csv_scan_objdet_annotations(
     for row in df.itertuples(index=True):
         bbox_path = row.model_bbox_url if hasattr(row, 'model_bbox_url') and pd.notna(row.model_bbox_url) else None
         width, height = _read_image_dimensions(row.image_url)
+        points = _parse_yolo_obb_txt(bbox_path, width, height)
         entry = {
             "ImagePath": row.image_url,
             "MaskPath":  None,
-            "Rect":      [],
-            "Points":    _parse_yolo_obb_txt(bbox_path, width, height),
+            "Rect":      _rect_from_points(points),
+            "Points":    points,
             "ImgW":      width,
             "ImgH":      height,
         }
@@ -1378,6 +1417,16 @@ def _apply_objdet_model_fields(data: Dict, storage_root: str, train_count: int,
     m["valRatio"]            = hyperparams.get("valRatio",   _DEFAULT_HPARAMS.get("valRatio",  20))
     m["minEpoch"]            = hyperparams.get("minEpoch",   _DEFAULT_HPARAMS.get("minEpoch",   0))
     m["patience"]            = hyperparams.get("patience",   _DEFAULT_HPARAMS.get("patience",  50))
+    # iBatchSize: honor an explicit override; otherwise keep whatever's already in the
+    # JSON (it may have been deliberately tuned for GPU memory, e.g. batch_size=1) as
+    # long as it's a valid positive int. Only fall back to the global default when it's
+    # missing/invalid — inference calls always pass hyperparams={} today, so without this
+    # check DLProcessWrapper gets whatever placeholder value the file already had.
+    current_batch = m.get("iBatchSize")
+    if "batch_size" in hyperparams:
+        m["iBatchSize"] = hyperparams["batch_size"]
+    elif not (isinstance(current_batch, int) and current_batch > 0):
+        m["iBatchSize"] = _DEFAULT_HPARAMS.get("batch_size", 1)
 
     # Image dimensions: prefer imported model dims, then the first annotated image, then template default
     if rect_dims:
@@ -1457,8 +1506,7 @@ def _ensure_objdet_templates(train_json: str, eval_json: str, test_json: str) ->
         (eval_json, "Evaluation.json", OBJECTDETECTION_TRAIN_TEMPLATE_DIR),
         (test_json, "Testing.json",    OBJECTDETECTION_TEST_TEMPLATE_DIR),
     ]:
-        candidates = [os.path.join(tpl_dir, name.lower()), os.path.join(tpl_dir, name)]
-        src = next((c for c in candidates if os.path.exists(c)), None)
+        src = _find_template_source(tpl_dir, name)
         if src is None:
             logger.error(f"Object detection template {name} not found in {tpl_dir}")
             return False
@@ -1754,16 +1802,16 @@ def monitor_log(path, status):
                 break
 
 
-def run_dl_process_wrapper(config_path, status, mode="Train"):
+def run_dl_process_wrapper(config_path, status, mode="Train", training_type: str = "classification"):
     """
-    Execute DLProcessWrapper.exe with the given config and mode string.
-    For classification    : mode in {"Train", "Evaluate", "Test"}
-    For segmentation      : mode in {"segTrainBinary", "segEvaluateBinary", "segTestBinary"}
-    For object detection  : mode in {"ODMTrain", "ODMEvaluate", "ODMTest"}
+    Execute the DL wrapper EXE with the given config and mode string.
+    For classification    : mode in {"Train", "Evaluate", "Test"} — TensorFlow DLProcessWrapper.exe
+    For segmentation      : mode in {"segTrainBinary", "segEvaluateBinary", "segTestBinary"} — TensorFlow DLProcessWrapper.exe
+    For object detection  : mode in {"ODMTrain", "ODMEvaluate", "ODMTest"} — PyTorch dl_pt_wrapper.exe
     """
-    exe_path = DL_PROCESS_WRAPPER_PATH
+    exe_path = json_data['paths'][training_type.lower()]['dl_path']
     if not os.path.exists(exe_path):
-        logger.error(f"DLProcessWrapper.exe not found at {exe_path}.")
+        logger.error(f"DL wrapper exe not found at {exe_path}.")
         return False
 
     cmd = [exe_path, config_path, mode]
@@ -1792,7 +1840,7 @@ def run_dl_process_wrapper(config_path, status, mode="Train"):
         return False
 
 
-def poll_for_status(file_path, timeout=600):
+def poll_for_status(file_path, timeout=6000):
     """
     Poll Status.txt until SUCCESS/TENSORRT/End Learning is found, or timeout.
     Returns parsed status dict, {"status": "error", ...} on error, or None on timeout.
@@ -1820,21 +1868,41 @@ def poll_for_status(file_path, timeout=600):
     return None
 
 
-def poll_for_file(file_path, timeout=300):
-    """Poll until file exists and is non-empty. Returns True if found, False on timeout."""
+def poll_for_file(file_path: Union[str, List[str]], timeout=3600):
+    """Poll until a file exists and is non-empty. `file_path` may be a single path or a
+    list of candidate paths — all are checked on every iteration, returning as soon as
+    any one is found (useful when different DL wrapper backends write the same logical
+    result to different locations). Returns True if any candidate is found, False on
+    timeout."""
+    candidates = [file_path] if isinstance(file_path, str) else list(file_path)
     start_time = time.time()
-    logger.info(f"Polling for file: {file_path}")
+    logger.info(f"Polling for file: {candidates if len(candidates) > 1 else candidates[0]}")
     while time.time() - start_time < timeout:
-        if os.path.exists(file_path):
-            try:
-                if os.path.getsize(file_path) > 0:
-                    logger.info(f"File found and ready: {file_path}")
-                    return True
-            except Exception:
-                pass
+        for path in candidates:
+            if os.path.exists(path):
+                try:
+                    if os.path.getsize(path) > 0:
+                        logger.info(f"File found and ready: {path}")
+                        return True
+                except Exception:
+                    pass
         time.sleep(2)
-    logger.warning(f"Timeout waiting for file: {file_path}")
+    logger.warning(f"Timeout waiting for file: {candidates if len(candidates) > 1 else candidates[0]}")
     return False
+
+
+def _result_poll_candidates(base_path: str, training_type: str) -> Union[str, List[str]]:
+    """DLProcessWrapper (TF, classification/segmentation) writes confusion-matrix/IoU
+    result files flat in the Test|Train model dir. The PyTorch object-detection wrapper
+    (dl_pt_wrapper.exe) has been observed instead nesting them one level under a
+    subfolder named after the dataset pointer ('d', see _apply_objdet_dataset_pointer)
+    — a run's SEMDLTF.log reported a successful confusion-matrix write, yet the flat
+    path never received it. Poll both locations for objectdetection so whichever
+    convention is actually in use gets found; other task types are unaffected."""
+    if training_type != "objectdetection":
+        return base_path
+    nested = os.path.join(os.path.dirname(base_path), "d", os.path.basename(base_path))
+    return [base_path, nested]
 
 
 # ----------------------------------------------------------------------
@@ -2344,10 +2412,10 @@ def run_automated_training(
                         process_logger.warning(f"NODE:{status1}, Failed to create {stop_fname}: {e}")
 
                 process_logger.info(f"NODE:{status1}, Launching Training for Trial {trial.number}...")
-                if not run_dl_process_wrapper(training_json, "trial", modes["Train"]):
+                if not run_dl_process_wrapper(training_json, "trial", modes["Train"], training_type=training_type):
                     raise optuna.exceptions.TrialPruned("DLProcessWrapper execution failed.")
 
-                status = poll_for_status(status_file, timeout=60000)
+                status = poll_for_status(status_file, timeout=600000)
                 if status and isinstance(status, dict) and status.get("status") == "error":
                     raise optuna.exceptions.TrialPruned(f"Training failed: {status.get('message')}")
                 if not status:
@@ -2394,11 +2462,11 @@ def run_automated_training(
         except Exception as e:
             process_logger.warning(f"NODE:{status1}, Failed to create {stop_fname}: {e}")
 
-    if not run_dl_process_wrapper(training_json, status1, modes["Train"]):
+    if not run_dl_process_wrapper(training_json, status1, modes["Train"], training_type=training_type):
         return {"status": "error", "message": "Training process failed execution"}
 
     # --- 4. Poll for training completion ---
-    last_status = poll_for_status(status_file, timeout=60000)
+    last_status = poll_for_status(status_file, timeout=600000)
     if last_status and isinstance(last_status, dict) and last_status.get("status") == "error":
         return last_status
     if not last_status:
@@ -2423,13 +2491,13 @@ def run_automated_training(
     except Exception as e:
         process_logger.warning(f"NODE:{status1}, Failed to create StopbufferTest.txt: {e}")
 
-    if not run_dl_process_wrapper(eval_json, status1, modes["Evaluate"]):
+    if not run_dl_process_wrapper(eval_json, status1, modes["Evaluate"], training_type=training_type):
         # return {"status": "error", "message": "Evaluation process failed execution",
         #         "last_training_status": last_status}
         return {"status": "error", "message": "Error in run_dl_process_wrapper function.",
                 "last_training_status": last_status}
 
-    if not poll_for_file(eval_poll_path, timeout=600):
+    if not poll_for_file(_result_poll_candidates(eval_poll_path, training_type), timeout=3600):
         process_logger.warning(f"NODE:{status1}, Timeout waiting for Evaluation results.")
 
     # --- 6. Parse Eval results ---
@@ -2480,11 +2548,11 @@ def run_automated_training(
         except Exception as e:
             process_logger.warning(f"NODE:{status1}, Failed to create StopbufferTest.txt in Test dir: {e}")
 
-        if not run_dl_process_wrapper(real_test_json_path, status1, modes["Test"]):
+        if not run_dl_process_wrapper(real_test_json_path, status1, modes["Test"], training_type=training_type):
             return {"status": "error", "message": "Testing process failed execution",
                     "last_training_status": last_status, "eval_results": eval_results}
 
-        if not poll_for_file(test_poll_path, timeout=600):
+        if not poll_for_file(_result_poll_candidates(test_poll_path, training_type), timeout=3600):
             process_logger.warning(f"NODE:{status1}, Timeout waiting for Testing results.")
 
         # --- 8. Parse Test results ---
@@ -2518,6 +2586,15 @@ def run_automated_training(
 def run_export_model(storage_root: str, training_type: str = "classification", status=14, label=None) -> bool:
     """Export the trained model using DLProcessWrapper (Export / segExport mode)."""
     process_logger.info(f"NODE:{status}, Starting model export ({training_type})")
+    if label == "Deployed_param":
+        imported_model_path = os.path.join(storage_root, "Imported_model")
+        export_save_path = os.path.join(storage_root, "Exported_model_Deployed_param")
+        if os.path.exists(imported_model_path):
+            process_logger.info(f"NODE:{status}, Copying Imported_model directly to {export_save_path}")
+            shutil.copytree(imported_model_path, export_save_path, dirs_exist_ok=True)
+            return export_save_path
+        else:
+            process_logger.error(f"NODE:88, Imported_model folder not found at {imported_model_path} for Deployed_param")
     # export_json_path = os.path.join(storage_root,"Expo")
     model_name = get_latest_model_name(storage_root)
     paths_dict = get_model_paths(storage_root, model_name)
@@ -2558,12 +2635,12 @@ def run_export_model(storage_root: str, training_type: str = "classification", s
         return False
 
     export_mode = "segExport" if training_type == "segmentation" else "Export"
-    if not run_dl_process_wrapper(export_json_path, status, export_mode):
+    if not run_dl_process_wrapper(export_json_path, status, export_mode, training_type=training_type):
         process_logger.error("NODE:88, Model export failed")
         return False
     if training_type != "segmentation":
-        shutil.copy(os.path.join(storage_root,"Imported_model\Class_Info.txt"), export_save_path)
-    source = os.path.join(storage_root,f"Test\{model_name}")
+        shutil.copy(os.path.join(storage_root,"Imported_model","Class_Info.txt"), export_save_path)
+    source = os.path.join(storage_root,"Test",model_name)
    
     process_logger.info(f"NODE:{status}, Model exported to {export_save_path}")
     return export_save_path
@@ -2685,11 +2762,11 @@ def run_inference(
     except Exception as e:
         process_logger.warning(f"NODE:{status}, Failed to create StopbufferTest.txt: {e}")
 
-    if not run_dl_process_wrapper(eval_json, status, modes["Evaluate"]):
+    if not run_dl_process_wrapper(eval_json, status, modes["Evaluate"], training_type=training_type):
         # return {"status": "error", "message": "Evaluation process failed execution"}
         return {"status": "error", "message": "Error in run_dl_process_wrapper function"}
 
-    if not poll_for_file(eval_poll_path, timeout=600):
+    if not poll_for_file(_result_poll_candidates(eval_poll_path, training_type), timeout=3600):
         process_logger.warning(f"NODE:{status}, Timeout waiting for Evaluation results.")
 
     # Parse eval results
@@ -2761,11 +2838,11 @@ def run_inference(
         except Exception as e:
             process_logger.warning(f"NODE:{status}, Failed to create StopbufferTest.txt in Test dir: {e}")
 
-        if not run_dl_process_wrapper(test_json, status, modes["Test"]):
+        if not run_dl_process_wrapper(test_json, status, modes["Test"], training_type=training_type):
             return {"status": "error", "message": "Testing process failed execution",
                     "eval_results": eval_results}
 
-        if not poll_for_file(test_poll_path, timeout=600):
+        if not poll_for_file(_result_poll_candidates(test_poll_path, training_type), timeout=3600):
             process_logger.warning(f"NODE:{status}, Timeout waiting for Testing results.")
 
         if training_type == "classification":
@@ -2796,3 +2873,60 @@ def run_inference(
         "model_name":   model_name,
         "csv_path":     os.path.join(test_dir_path,f"Test_Miss_Overkill_{label_item}.csv") if training_type == "classification" else None,
     }
+
+
+if __name__ == "__main__":
+    # Sample runner for the object-detection CSV -> annotation-JSON path (Rect + Points).
+    # Run from the repo root (backend/config.json is resolved relative to the cwd).
+    #
+    # Lightweight mode (default): scan the CSV and write only the dataset-descriptor
+    # JSONs into --out (mirrors the real layout: Train/d.json, Train/Input_Train.json,
+    # Train/Input_Val.json, Test/d.json). No storage root or template JSONs needed.
+    #     python training_service.py train_dataset.csv --out objdet_sample_out
+    #
+    # Full mode: the exact call the pipeline makes, writing Training/Evaluation/Testing
+    # JSONs plus descriptors under <storage_root>/Train/Model_X/ and Test/Model_X/.
+    #     python training_service.py train_dataset.csv --storage-root D:\plato_storage
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Sample runner for the objdet dataset pipeline")
+    parser.add_argument("csv", nargs="?", default="train_dataset.csv", help="Path to train_dataset.csv")
+    parser.add_argument("--out", default="objdet_sample_out",
+                        help="Output dir for descriptor JSONs in lightweight mode (default: objdet_sample_out)")
+    parser.add_argument("--storage-root", default=None,
+                        help="Run csv_scan_dataset_and_update_configs_objdet against this storage root instead")
+    args = parser.parse_args()
+
+    if args.storage_root:
+        result = csv_scan_dataset_and_update_configs_objdet(args.csv, args.storage_root)
+        print(f"csv_scan_dataset_and_update_configs_objdet -> {result}")
+        if result.get("success"):
+            paths = get_model_paths(args.storage_root, get_latest_model_name(args.storage_root))
+            where = paths["train_dir"] + (f" and {paths['test_dir']}" if result.get("has_test") else "")
+            print(f"Descriptor JSONs written under: {where}")
+    else:
+        base_train, base_val, base_test, new_train, new_val, new_test = csv_scan_objdet_annotations(args.csv)
+        train_imgs = base_train + new_train
+        val_imgs   = base_val + new_val
+        test_imgs  = base_test + new_test
+
+        train_dir = os.path.join(args.out, "Train")
+        os.makedirs(train_dir, exist_ok=True)
+        write_objdet_annotations_json(os.path.join(train_dir, "d.json"), train_imgs + val_imgs)
+        write_objdet_annotations_json(os.path.join(train_dir, "Input_Train.json"), train_imgs)
+        write_objdet_annotations_json(os.path.join(train_dir, "Input_Val.json"), val_imgs)
+        if test_imgs:
+            test_dir = os.path.join(args.out, "Test")
+            os.makedirs(test_dir, exist_ok=True)
+            write_objdet_annotations_json(os.path.join(test_dir, "d.json"), test_imgs)
+        print(f"{len(train_imgs)} train, {len(val_imgs)} val, {len(test_imgs)} test images -> {args.out}")
+
+        sample = next((e for e in train_imgs + val_imgs + test_imgs if e["Points"]), None)
+        if sample is not None:
+            print(f"sample image: {sample['ImagePath']} "
+                  f"({sample['ImgW']}x{sample['ImgH']}, {len(sample['Points'])} objects)")
+            print(f"  Points[0]: {sample['Points'][0]}")
+            print(f"  Rect[0]:   {sample['Rect'][0]}  (axis-aligned bbox of Points[0])")
+        else:
+            print("No Points parsed - check the CSV's model_bbox_url .txt paths and that the "
+                  "images in image_url are reachable (dims are read from the image files).")
